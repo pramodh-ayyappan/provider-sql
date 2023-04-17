@@ -121,6 +121,14 @@ type GrantParameters struct {
 	// +immutable
 	// +optional
 	MemberOfSelector *xpv1.Selector `json:"memberOfSelector,omitempty"`
+
+	// Schema this grant is for.
+	// +optional
+	Schema *string `json:"schema,omitempty"`
+
+	// Schema this grant is for.
+	// +optional
+	Table *string `json:"table,omitempty"`
 }
 
 // A GrantStatus represents the observed state of a Grant.

@@ -58,7 +58,8 @@ const (
 
 	errInvalidParams = "invalid parameters for grant type %s"
 
-	errMemberOfWithDatabaseOrPrivileges = "cannot set privileges or database in the same grant as memberOf"
+	errMemberOfWithDatabaseOrPrivileges        = "cannot set privileges or database in the same grant as memberOf"
+	errTableWithDatabaseOrPrivilegesOrMemberOf = "cannot set privileges or database or memberOf in the same grant as table"
 
 	maxConcurrency = 5
 )
@@ -135,6 +136,7 @@ type grantType string
 const (
 	roleMember   grantType = "ROLE_MEMBER"
 	roleDatabase grantType = "ROLE_DATABASE"
+	roleTable    grantType = "ROLE_TABLE"
 )
 
 func identifyGrantType(gp v1alpha1.GrantParameters) (grantType, error) {
@@ -148,6 +150,16 @@ func identifyGrantType(gp v1alpha1.GrantParameters) (grantType, error) {
 			return "", errors.New(errMemberOfWithDatabaseOrPrivileges)
 		}
 		return roleMember, nil
+	}
+
+	// If table is specified, this is ROLE_TABLE
+	// NOTE: If any of these are set, even if the lookup by ref or selector fails,
+	// then this is still a roleTable grant type.
+	if gp.MemberOfRef != nil || gp.MemberOfSelector != nil || gp.MemberOf != nil || gp.Database != nil {
+		if gp.Table != nil && gp.Schema != nil || pc > 0 {
+			return "", errors.New(errTableWithDatabaseOrPrivilegesOrMemberOf)
+		}
+		return roleTable, nil
 	}
 
 	if gp.Database == nil {
@@ -216,6 +228,35 @@ func selectGrantQuery(gp v1alpha1.GrantParameters, q *xsql.Query) error {
 			pq.Array(sp),
 		}
 		return nil
+	case roleTable:
+		gro := gp.WithOption != nil && *gp.WithOption == v1alpha1.GrantOptionGrant
+		sp := gp.Privileges.ToStringSlice()
+
+		include_table := ""
+		if *gp.Table == "ALL" {
+			include_table = ""
+		} else {
+			include_table = "AND table_name=" + *gp.Table
+		}
+
+		q.String = "SELECT EXISTS (SELECT 1" +
+			"FROM information_schema.role_table_grants" +
+			"WHERE grantee=$1" +
+			"AND table_schema=$2" +
+			include_table +
+			"AND is_grantable=$4" +
+			"GROUP BY grantee, table_schema, table_name" +
+			"HAVING array_agg(privilege_type::text" +
+			"ORDER BY privilege_type) = $5::text[])"
+
+		q.Parameters = []interface{}{
+			gp.Role,
+			gp.Schema,
+			gp.Table,
+			gro,
+			pq.Array(sp),
+		}
+		return nil
 	}
 	return errors.New(errUnknownGrant)
 }
@@ -275,6 +316,52 @@ func createGrantQueries(gp v1alpha1.GrantParameters, ql *[]xsql.Query) error { /
 			)},
 		)
 		return nil
+	case roleTable:
+		if gp.Table == nil || len(gp.Privileges) < 1 {
+			return errors.Errorf(errInvalidParams, roleTable)
+		}
+
+		table := pq.QuoteIdentifier(*gp.Table)
+		sp := strings.Join(gp.Privileges.ToStringSlice(), ",")
+
+		if *gp.Table == "ALL" {
+			*ql = append(*ql,
+				// REVOKE ANY MATCHING EXISTING PERMISSIONS
+				xsql.Query{String: fmt.Sprintf("REVOKE %s ON ALL TABLES IN SCHEMA %s FROM %s",
+					sp,
+					*gp.Schema,
+					ro,
+				)},
+
+				// GRANT REQUESTED PERMISSIONS
+				xsql.Query{String: fmt.Sprintf("GRANT %s ON ALL TABLES IN SCHEMA %s TO %s %s",
+					sp,
+					*gp.Schema,
+					ro,
+					withOption(gp.WithOption),
+				)},
+			)
+		} else {
+			*ql = append(*ql,
+				// REVOKE ANY MATCHING EXISTING PERMISSIONS
+				xsql.Query{String: fmt.Sprintf("REVOKE %s ON %s.%s FROM %s",
+					sp,
+					*gp.Schema,
+					table,
+					ro,
+				)},
+
+				// GRANT REQUESTED PERMISSIONS
+				xsql.Query{String: fmt.Sprintf("GRANT %s ON %s.%s TO %s %s",
+					sp,
+					*gp.Schema,
+					table,
+					ro,
+					withOption(gp.WithOption),
+				)},
+			)
+		}
+		return nil
 	}
 	return errors.New(errUnknownGrant)
 }
@@ -300,6 +387,21 @@ func deleteGrantQuery(gp v1alpha1.GrantParameters, q *xsql.Query) error {
 			pq.QuoteIdentifier(*gp.Database),
 			ro,
 		)
+	case roleTable:
+		if *gp.Table == "ALL" {
+			q.String = fmt.Sprintf("REVOKE %s ON ALL TABLES IN SCHEMA %s FROM %s",
+				strings.Join(gp.Privileges.ToStringSlice(), ","),
+				*gp.Schema,
+				ro,
+			)
+		} else {
+			q.String = fmt.Sprintf("REVOKE %s ON %s.%s FROM %s",
+				strings.Join(gp.Privileges.ToStringSlice(), ","),
+				*gp.Schema,
+				*gp.Table,
+				ro,
+			)
+		}
 		return nil
 	}
 	return errors.New(errUnknownGrant)
