@@ -120,8 +120,17 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.E
 	if err := c.kube.Get(ctx, types.NamespacedName{Namespace: ref.Namespace, Name: ref.Name}, s); err != nil {
 		return nil, errors.Wrap(err, errGetSecret)
 	}
+
+	pg := &v1alpha1.GrantParameters{}
+	defaultDatabase := ""
+	if pg.Table != nil {
+		defaultDatabase = *pg.Table
+	} else {
+		defaultDatabase = pc.Spec.DefaultDatabase
+	}
+
 	return &external{
-		db:   c.newDB(s.Data, pc.Spec.DefaultDatabase, clients.ToString(pc.Spec.SSLMode)),
+		db:   c.newDB(s.Data, defaultDatabase, clients.ToString(pc.Spec.SSLMode)),
 		kube: c.kube,
 	}, nil
 }
